@@ -26,7 +26,7 @@ import { connect } from 'cloudflare:sockets';
 
 const Config = {
   userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
-  proxyIPs: ['nima.nscl.ir:443', 'bpb.yousef.isegaro.com:443'],
+  proxyIPs: ['nima.nscl.ir:443', 'bpb.yousef.isegaro.com:443'], // Fixed valid domains
   
   scamalytics: {
     username: 'victoriacrossn',
@@ -49,7 +49,7 @@ const Config = {
         const { results } = await env.DB.prepare(
           "SELECT ip_port FROM proxy_health WHERE is_healthy = 1 ORDER BY latency_ms ASC LIMIT 1"
         ).all();
-        selectedProxyIP = results[0]?.ip_port || null;
+        selectedProxyIP = results?.[0]?.ip_port || null;
         if (selectedProxyIP) {
           console.log(`✓ Using best healthy proxy from DB: ${selectedProxyIP}`);
         }
@@ -77,7 +77,7 @@ const Config = {
     // Critical fallback
     if (!selectedProxyIP) {
       console.error('CRITICAL: No proxy IP available');
-      selectedProxyIP = this.proxyIPs[0]; 
+      selectedProxyIP = 'cloudflare.com:443'; // Fallback to a reliable domain
     }
     
     const [proxyHost, proxyPort = '443'] = selectedProxyIP.split(':');
@@ -1999,7 +1999,125 @@ const adminPanelHTML = `<!DOCTYPE html>
         }
       }
 
-      // سیستم Auto-Refresh
+      function renderUsers() {
+        const tbody = document.getElementById('userList');
+        if (!tbody) return;
+        
+        tbody.innerHTML = '';
+        
+        allUsers.forEach(user => {
+          const isExpired = new Date(user.expiration_date + 'T' + user.expiration_time + 'Z') <= new Date();
+          const trafficUsed = formatBytes(user.traffic_used || 0);
+          const trafficLimit = user.traffic_limit ? formatBytes(user.traffic_limit) : 'Unlimited';
+          
+          const row = document.createElement('tr');
+          row.innerHTML = \`
+            <td><input type="checkbox" class="user-checkbox" value="\${user.uuid}"></td>
+            <td class="uuid-cell">
+              <span style="font-family: monospace; font-size: 12px;">\${user.uuid}</span>
+              <button class="btn-copy-uuid" data-uuid="\${user.uuid}">Copy</button>
+            </td>
+            <td>\${new Date(user.created_at).toLocaleDateString()}</td>
+            <td>\${user.expiration_date} \${user.expiration_time}</td>
+            <td><span class="status-badge \${isExpired ? 'status-expired' : 'status-active'}">\${isExpired ? 'Expired' : 'Active'}</span></td>
+            <td>\${escapeHTML(user.notes || '')}</td>
+            <td>\${trafficLimit}</td>
+            <td>\${trafficUsed}</td>
+            <td>\${user.ip_limit === -1 ? 'Unlimited' : user.ip_limit}</td>
+            <td>
+              <button class="btn-copy-uuid" data-action="edit" data-uuid="\${user.uuid}">Edit</button>
+              <button class="btn-copy-uuid" data-action="delete" data-uuid="\${user.uuid}" style="background: rgba(239,68,68,0.1); color: #ef4444; border-color: rgba(239,68,68,0.3);">Delete</button>
+            </td>
+          \`;
+          tbody.appendChild(row);
+        });
+        
+        // Add event listeners
+        document.querySelectorAll('.btn-copy-uuid[data-uuid]').forEach(btn => {
+          if (btn.dataset.action === 'edit') {
+            btn.addEventListener('click', () => editUser(btn.dataset.uuid));
+          } else if (btn.dataset.action === 'delete') {
+            btn.addEventListener('click', () => deleteUser(btn.dataset.uuid));
+          } else {
+            btn.addEventListener('click', () => {
+              navigator.clipboard.writeText(btn.dataset.uuid).then(() => {
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                  btn.textContent = 'Copy';
+                  btn.classList.remove('copied');
+                }, 2000);
+              });
+            });
+          }
+        });
+      }
+
+      async function fetchStats() {
+        try {
+          const stats = await api.get('/stats');
+          
+          document.getElementById('total-users').textContent = stats.total_users || 0;
+          document.getElementById('active-users').textContent = stats.active_users || 0;
+          document.getElementById('expired-users').textContent = stats.expired_users || 0;
+          document.getElementById('total-traffic').textContent = formatBytes(stats.total_traffic || 0);
+          
+          // Update server time
+          const now = new Date();
+          document.getElementById('server-time').textContent = now.toLocaleTimeString();
+          
+          // Update proxy health
+          if (stats.proxy_health) {
+            const healthCard = document.getElementById('proxy-health-card');
+            const healthValue = document.getElementById('proxy-health');
+            const healthBadge = document.getElementById('proxy-health-badge');
+            
+            if (stats.proxy_health.is_healthy) {
+              healthValue.textContent = \`\${stats.proxy_health.latency_ms || 0}ms\`;
+              healthValue.style.color = 'var(--success)';
+              healthBadge.innerHTML = '<span class="pulse-dot green"></span> Healthy';
+              healthBadge.className = 'stat-badge online';
+              healthCard.classList.add('healthy');
+            } else {
+              healthValue.textContent = 'Unhealthy';
+              healthValue.style.color = 'var(--danger)';
+              healthBadge.innerHTML = '<span class="pulse-dot red"></span> Unhealthy';
+              healthBadge.className = 'stat-badge offline';
+              healthCard.classList.add('danger');
+            }
+          }
+        } catch (error) {
+          console.error('Failed to fetch stats:', error);
+        }
+      }
+
+      async function editUser(uuid) {
+        const user = allUsers.find(u => u.uuid === uuid);
+        if (!user) return;
+        
+        document.getElementById('editUuid').value = uuid;
+        document.getElementById('editExpiryDate').value = user.expiration_date;
+        document.getElementById('editExpiryTime').value = user.expiration_time;
+        document.getElementById('editNotes').value = user.notes || '';
+        document.getElementById('editDataLimit').value = user.traffic_limit || '';
+        document.getElementById('editIpLimit').value = user.ip_limit || -1;
+        
+        document.getElementById('editModal').classList.add('show');
+      }
+
+      async function deleteUser(uuid) {
+        if (!confirm('Are you sure you want to delete this user?')) return;
+        
+        try {
+          await api.delete('/users/' + uuid);
+          showToast('User deleted successfully', 'success');
+          fetchAndRenderUsers();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      }
+
+      // Auto-refresh system
       function startAutoRefresh() {
         setInterval(async () => {
           try {
@@ -2011,8 +2129,243 @@ const adminPanelHTML = `<!DOCTYPE html>
         }, 60000);
       }
 
-      // بقیه کدهای JavaScript ادمین پنل...
-      // به دلیل محدودیت طول، بخش‌های تکراری حذف شده‌اند
+      // Initialize
+      fetchAndRenderUsers();
+      startAutoRefresh();
+      
+      // Update server time every second
+      setInterval(() => {
+        const now = new Date();
+        document.getElementById('server-time').textContent = now.toLocaleTimeString();
+      }, 1000);
+      
+      // Event listeners
+      document.getElementById('generateUUID').addEventListener('click', () => {
+        document.getElementById('uuid').value = crypto.randomUUID();
+      });
+      
+      document.getElementById('createUserForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const uuid = document.getElementById('uuid').value.trim();
+        const expiryDate = document.getElementById('expiryDate').value;
+        const expiryTime = document.getElementById('expiryTime').value;
+        const notes = document.getElementById('notes').value.trim();
+        const dataLimit = document.getElementById('dataLimit').value;
+        const dataUnit = document.getElementById('dataUnit').value;
+        const ipLimit = document.getElementById('ipLimit').value;
+        
+        if (!isValidUUID(uuid)) {
+          showToast('Invalid UUID format', true);
+          return;
+        }
+        
+        // Convert data limit to bytes
+        let trafficLimit = null;
+        if (dataLimit && dataUnit !== 'unlimited') {
+          const bytes = parseFloat(dataLimit);
+          const multiplier = {
+            'KB': 1024,
+            'MB': 1024 * 1024,
+            'GB': 1024 * 1024 * 1024,
+            'TB': 1024 * 1024 * 1024 * 1024
+          }[dataUnit];
+          trafficLimit = Math.round(bytes * multiplier);
+        }
+        
+        const { utcDate, utcTime } = localToUTC(expiryDate, expiryTime + ':00');
+        
+        try {
+          await api.post('/users', {
+            uuid,
+            exp_date: utcDate,
+            exp_time: utcTime,
+            notes,
+            traffic_limit: trafficLimit,
+            ip_limit: ipLimit ? parseInt(ipLimit) : -1
+          });
+          
+          showToast('User created successfully', 'success');
+          document.getElementById('createUserForm').reset();
+          document.getElementById('uuid').value = crypto.randomUUID();
+          fetchAndRenderUsers();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      });
+      
+      document.getElementById('editUserForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const uuid = document.getElementById('editUuid').value;
+        const expiryDate = document.getElementById('editExpiryDate').value;
+        const expiryTime = document.getElementById('editExpiryTime').value;
+        const notes = document.getElementById('editNotes').value.trim();
+        const dataLimit = document.getElementById('editDataLimit').value;
+        const dataUnit = document.getElementById('editDataUnit').value;
+        const ipLimit = document.getElementById('editIpLimit').value;
+        const resetTraffic = document.getElementById('resetTraffic').checked;
+        
+        // Convert data limit to bytes
+        let trafficLimit = null;
+        if (dataLimit && dataUnit !== 'unlimited') {
+          const bytes = parseFloat(dataLimit);
+          const multiplier = {
+            'KB': 1024,
+            'MB': 1024 * 1024,
+            'GB': 1024 * 1024 * 1024,
+            'TB': 1024 * 1024 * 1024 * 1024
+          }[dataUnit];
+          trafficLimit = Math.round(bytes * multiplier);
+        }
+        
+        const { utcDate, utcTime } = localToUTC(expiryDate, expiryTime + ':00');
+        
+        try {
+          await api.put('/users/' + uuid, {
+            exp_date: utcDate,
+            exp_time: utcTime,
+            notes,
+            traffic_limit: trafficLimit,
+            ip_limit: ipLimit ? parseInt(ipLimit) : -1,
+            reset_traffic: resetTraffic
+          });
+          
+          showToast('User updated successfully', 'success');
+          document.getElementById('editModal').classList.remove('show');
+          fetchAndRenderUsers();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      });
+      
+      document.getElementById('modalCancelBtn').addEventListener('click', () => {
+        document.getElementById('editModal').classList.remove('show');
+      });
+      
+      document.getElementById('deleteSelected').addEventListener('click', async () => {
+        const checkboxes = document.querySelectorAll('.user-checkbox:checked');
+        if (checkboxes.length === 0) {
+          showToast('No users selected', 'warning');
+          return;
+        }
+        
+        if (!confirm(\`Are you sure you want to delete \${checkboxes.length} user(s)?\`)) return;
+        
+        const uuids = Array.from(checkboxes).map(cb => cb.value);
+        
+        try {
+          await api.post('/users/bulk-delete', { uuids });
+          showToast(\`Deleted \${uuids.length} user(s) successfully\`, 'success');
+          fetchAndRenderUsers();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      });
+      
+      document.getElementById('selectAll').addEventListener('change', (e) => {
+        const checkboxes = document.querySelectorAll('.user-checkbox');
+        checkboxes.forEach(cb => cb.checked = e.target.checked);
+      });
+      
+      document.getElementById('searchInput').addEventListener('input', (e) => {
+        const searchTerm = e.target.value.toLowerCase();
+        const rows = document.querySelectorAll('#userList tr');
+        
+        rows.forEach(row => {
+          const text = row.textContent.toLowerCase();
+          row.style.display = text.includes(searchTerm) ? '' : 'none';
+        });
+      });
+      
+      document.getElementById('healthCheckBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('healthCheckBtn');
+        btn.classList.add('loading');
+        btn.disabled = true;
+        
+        try {
+          await api.post('/health-check');
+          showToast('Health check completed', 'success');
+          fetchStats();
+        } catch (error) {
+          showToast(error.message, true);
+        } finally {
+          btn.classList.remove('loading');
+          btn.disabled = false;
+        }
+      });
+      
+      document.getElementById('logoutBtn').addEventListener('click', async () => {
+        try {
+          await api.post('/logout');
+          window.location.reload();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      });
+      
+      // Time quick set buttons
+      document.querySelectorAll('.time-quick-set-group button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const targetDateId = btn.parentElement.dataset.targetDate;
+          const targetTimeId = btn.parentElement.dataset.targetTime;
+          const amount = parseInt(btn.dataset.amount);
+          const unit = btn.dataset.unit;
+          
+          const dateInput = document.getElementById(targetDateId);
+          const timeInput = document.getElementById(targetTimeId);
+          
+          if (!dateInput || !timeInput) return;
+          
+          let date = new Date();
+          if (dateInput.value) {
+            const [year, month, day] = dateInput.value.split('-').map(Number);
+            const [hours, minutes, seconds] = timeInput.value.split(':').map(Number);
+            date = new Date(year, month - 1, day, hours || 0, minutes || 0, seconds || 0);
+          }
+          
+          switch (unit) {
+            case 'hour':
+              date.setHours(date.getHours() + amount);
+              break;
+            case 'day':
+              date.setDate(date.getDate() + amount);
+              break;
+            case 'month':
+              date.setMonth(date.getMonth() + amount);
+              break;
+          }
+          
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          const hours = String(date.getHours()).padStart(2, '0');
+          const minutes = String(date.getMinutes()).padStart(2, '0');
+          const seconds = String(date.getSeconds()).padStart(2, '0');
+          
+          dateInput.value = \`\${year}-\${month}-\${day}\`;
+          timeInput.value = \`\${hours}:\${minutes}:\${seconds}\`;
+        });
+      });
+      
+      // Set default expiry to 1 month from now
+      const defaultDate = new Date();
+      defaultDate.setMonth(defaultDate.getMonth() + 1);
+      const year = defaultDate.getFullYear();
+      const month = String(defaultDate.getMonth() + 1).padStart(2, '0');
+      const day = String(defaultDate.getDate()).padStart(2, '0');
+      
+      document.getElementById('expiryDate').value = \`\${year}-\${month}-\${day}\`;
+      document.getElementById('expiryTime').value = '23:59:59';
+      
+      // Generate initial UUID
+      document.getElementById('uuid').value = crypto.randomUUID();
+      
+      // Helper function
+      function isValidUUID(uuid) {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        return uuidRegex.test(uuid);
+      }
     });
   </script>
 </body>
@@ -3983,7 +4336,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
     
     const command = dataView.getUint8(commandIndex);
     if (command !== 1 && command !== 2) {
-      return { hasError: true, message: `command ${command} not supported` };
+      return { hasError: true, message: \`command \${command} not supported\` };
     }
 
     const portIndex = commandIndex + 1;
@@ -4036,7 +4389,7 @@ async function ProcessProtocolHeader(protocolBuffer, env, ctx) {
         break;
         
       default:
-        return { hasError: true, message: `invalid addressType: ${addressType}` };
+        return { hasError: true, message: \`invalid addressType: \${addressType}\` };
     }
 
     const rawDataIndex = addressValueIndex + addressLength;
@@ -4082,7 +4435,7 @@ async function HandleTCPOutBound(
         : connect({ hostname: address, port: port });
     }
     remoteSocket.value = tcpSocket;
-    log(`connected to ${address}:${port}`);
+    log(\`connected to \${address}:\${port}\`);
     const writer = tcpSocket.writable.getWriter();
     await writer.write(rawClientData);
     writer.releaseLock();
@@ -4130,7 +4483,7 @@ function MakeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     },
     pull(_controller) { },
     cancel(reason) {
-      log(`ReadableStream canceled: ${reason}`);
+      log(\`ReadableStream canceled: \${reason}\`);
       safeCloseWebSocket(webSocketServer);
     },
   });
@@ -4160,7 +4513,7 @@ async function RemoteSocketToWS(remoteSocket, webSocket, protocolResponseHeader,
           }
         },
         close() {
-          log(`remoteSocket closed, hasIncomingData: ${hasIncomingData}`);
+          log(\`remoteSocket closed, hasIncomingData: \${hasIncomingData}\`);
         },
         abort(reason) {
           console.error('remoteSocket abort', reason);
@@ -4237,7 +4590,7 @@ async function createDnsPipeline(webSocket, vlessResponseHeader, log, trafficCal
             const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
 
             if (webSocket.readyState === CONST.WS_READY_STATE_OPEN) {
-              log(`DNS query success, length: ${udpSize}`);
+              log(\`DNS query success, length: \${udpSize}\`);
               let responseChunk;
               if (isHeaderSent) {
                 responseChunk = await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer();
@@ -4330,7 +4683,7 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
       await writer.write(authRequest);
       res = (await reader.read()).value;
       if (!res || res[0] !== 0x01 || res[1] !== 0x00) {
-        throw new Error(`SOCKS5 auth failed (Code: ${res[1]})`);
+        throw new Error(\`SOCKS5 auth failed (Code: \${res[1]})\`);
       }
     }
 
@@ -4345,14 +4698,14 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
       case 3:
         const ipv6Bytes = parseIPv6(addressRemote);
         if (ipv6Bytes.length !== 16) {
-          throw new Error(`Failed to parse IPv6: ${addressRemote}`);
+          throw new Error(\`Failed to parse IPv6: \${addressRemote}\`);
         }
         dstAddr = new Uint8Array(1 + 16);
         dstAddr[0] = 4;
         dstAddr.set(ipv6Bytes, 1);
         break;
       default:
-        throw new Error(`Invalid address type: ${addressType}`);
+        throw new Error(\`Invalid address type: \${addressType}\`);
     }
 
     const socksRequest = new Uint8Array([
@@ -4362,15 +4715,15 @@ async function socks5Connect(addressType, addressRemote, portRemote, log, parsed
     
     res = (await reader.read()).value;
     if (!res || res[1] !== 0x00) {
-      throw new Error(`SOCKS5 connection failed (Code: ${res[1]})`);
+      throw new Error(\`SOCKS5 connection failed (Code: \${res[1]})\`);
     }
 
-    log(`SOCKS5 connection to ${addressRemote}:${portRemote} established`);
+    log(\`SOCKS5 connection to \${addressRemote}:\${portRemote} established\`);
     success = true;
     return socket;
 
   } catch (err) {
-    log(`socks5Connect error: ${err.message}`, err);
+    log(\`socks5Connect error: \${err.message}\`, err);
     throw err;
   } finally {
     if (writer) writer.releaseLock();
@@ -4436,7 +4789,7 @@ export default {
       try {
         cfg = await Config.fromEnv(env);
       } catch (err) {
-        console.error(`Configuration error: ${err.message}`);
+        console.error(\`Configuration error: \${err.message}\`);
         const headers = new Headers();
         addSecurityHeaders(headers, null, {});
         return new Response('Service unavailable', { status: 503, headers });
@@ -4447,7 +4800,7 @@ export default {
 
       const adminPrefix = env.ADMIN_PATH_PREFIX || 'admin';
       
-      if (url.pathname.startsWith(`/${adminPrefix}/`)) {
+      if (url.pathname.startsWith(\`/\${adminPrefix}/\`)) {
         return await handleAdminRequest(request, env, ctx, adminPrefix);
       }
 
@@ -4542,14 +4895,14 @@ export default {
 
       // Subscription Handlers
       const handleSubscription = async (core) => {
-        const rateLimitKey = `user_path_rate:${clientIp}`;
+        const rateLimitKey = \`user_path_rate:\${clientIp}\`;
         if (await checkRateLimit(env.DB, rateLimitKey, CONST.USER_PATH_RATE_LIMIT, CONST.USER_PATH_RATE_TTL)) {
           const headers = new Headers();
           addSecurityHeaders(headers, null, {});
           return new Response('Rate limit exceeded', { status: 429, headers });
         }
 
-        const uuid = url.pathname.substring(`/${core}/`.length);
+        const uuid = url.pathname.substring(\`/\${core}/\`.length);
         if (!isValidUUID(uuid)) {
           const headers = new Headers();
           addSecurityHeaders(headers, null, {});
@@ -4588,7 +4941,7 @@ export default {
       }
 
       // API: User Data Endpoints
-      const userApiMatch = url.pathname.match(/^\/api\/user\/([0-9a-f-]{36})(?:\/(.+))?$/i);
+      const userApiMatch = url.pathname.match(/^\\/api\\/user\\/([0-9a-f-]{36})(?:\\/(.+))?$/i);
       if (userApiMatch) {
         const uuid = userApiMatch[1];
         const subPath = userApiMatch[2] || '';
@@ -4658,7 +5011,7 @@ export default {
       // User Panel Handler
       const path = url.pathname.slice(1);
       if (isValidUUID(path)) {
-        const rateLimitKey = `user_path_rate:${clientIp}`;
+        const rateLimitKey = \`user_path_rate:\${clientIp}\`;
         if (await checkRateLimit(env.DB, rateLimitKey, CONST.USER_PATH_RATE_LIMIT, CONST.USER_PATH_RATE_TTL)) {
           const headers = new Headers();
           addSecurityHeaders(headers, null, {});
@@ -4682,7 +5035,7 @@ export default {
           try {
             proxyUrl = new URL(env.ROOT_PROXY_URL);
           } catch (urlError) {
-            console.error(`Invalid ROOT_PROXY_URL: ${env.ROOT_PROXY_URL}`, urlError);
+            console.error(\`Invalid ROOT_PROXY_URL: \${env.ROOT_PROXY_URL}\`, urlError);
             const headers = new Headers();
             addSecurityHeaders(headers, null, {});
             return new Response('Proxy configuration error', { status: 500, headers });
@@ -4732,15 +5085,15 @@ export default {
             headers: mutableHeaders
           });
         } catch (e) {
-          console.error(`Reverse Proxy Error: ${e.message}`, e.stack);
+          console.error(\`Reverse Proxy Error: \${e.message}\`, e.stack);
           const headers = new Headers();
           addSecurityHeaders(headers, null, {});
-          return new Response(`Proxy error: ${e.message}`, { status: 502, headers });
+          return new Response(\`Proxy error: \${e.message}\`, { status: 502, headers });
         }
       }
 
       // Masquerade Response
-      const masqueradeHtml = `<!DOCTYPE html>
+      const masqueradeHtml = \`<!DOCTYPE html>
 <html>
 <head>
   <title>Welcome to nginx!</title>
@@ -4759,7 +5112,7 @@ export default {
   <p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.</p>
   <p><em>Thank you for using nginx.</em></p>
 </body>
-</html>`;
+</html>\`;
       const headers = new Headers({ 'Content-Type': 'text/html' });
       addSecurityHeaders(headers, null, {});
       return new Response(masqueradeHtml, { headers });
